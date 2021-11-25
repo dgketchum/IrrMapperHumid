@@ -3,9 +3,10 @@ from pprint import pprint
 from subprocess import check_call
 from collections import OrderedDict
 
+import numpy as np
 import fiona
 from rasterstats import zonal_stats
-from shapely.geometry import shape
+from shapely.geometry import shape, Polygon
 
 from state_county_names_codes import state_fips_code, state_county_code
 from cdl import cdl_crops
@@ -14,6 +15,11 @@ OGR = '/usr/bin/ogr2ogr'
 AEA = '+proj=aea +lat_0=40 +lon_0=-96 +lat_1=20 +lat_2=60 +x_0=0 +y_0=0 +ellps=GRS80 ' \
       '+towgs84=0,0,0,0,0,0,0 +units=m +no_defs'
 WGS = '+proj=longlat +datum=WGS84 +no_defs'
+
+
+def popper(geometry):
+    p = (4 * np.pi * geometry.area) / (geometry.boundary.length ** 2.)
+    return p
 
 
 def clip_field_boundaries_county(fields_dir, county_shp_dir, out_dir):
@@ -36,7 +42,7 @@ def clip_field_boundaries_county(fields_dir, county_shp_dir, out_dir):
             check_call(cmd)
 
 
-def attribute_county_fields(county_shp_dir, out_co_dir, cdl):
+def attribute_county_fields(county_shp_dir, out_co_dir, min_area=5e4):
     state_codes = state_fips_code()
     for s, c in state_codes.items():
         if s != 'SD':
@@ -49,52 +55,44 @@ def attribute_county_fields(county_shp_dir, out_co_dir, cdl):
             geoid = v['GEOID']
             if geoid != '46125':
                 continue
-            blank_fields = os.path.join(county_shp_dir, s, '{}.shp'.format(geoid))
+            raw_fields = os.path.join(county_shp_dir, s, '{}.shp'.format(geoid))
             attr_fields = os.path.join(out_co_dir, s, '{}.shp'.format(geoid))
 
-            ct = 1
-            geo = []
-            bad_geo_ct = 0
-            with fiona.open(blank_fields) as src:
+            fct, ct, non_polygon, bad_geo_ct = 0, 0, 0, 0
+            features = []
+            with fiona.open(raw_fields) as src:
                 meta = src.meta
                 for feat in src:
+                    fct += 1
                     try:
-                        _ = feat['geometry']['type']
-                        geo.append(feat)
+                        gtype = feat['geometry']['type']
+                        if gtype != 'Polygon':
+                            non_polygon += 1
+                            continue
+                        geo = shape(feat['geometry'])
+                        if geo.area < min_area:
+                            continue
+                        popper_ = float(popper(geo))
+                        props = feat['properties']
+                        cdl_keys = [x for x in props.keys() if 'CROP_' in x]
+                        cdl_ = [props[x] for x in cdl_keys]
+                        vals, counts = np.unique(cdl_, return_counts=True)
+                        cdl_mode = vals[np.argmax(counts)].item()
+                        feat['properties'] = {k: v for k, v in feat['properties'].items() if k in cdl_keys}
+                        feat['properties'].update({'FID': ct,
+                                                   'cdl_mode': cdl_mode,
+                                                   'popper': popper_})
+
+                        features.append(feat)
+                        ct += 1
                     except TypeError:
                         bad_geo_ct += 1
+            new_attrs = [('FID', 'int:9'), ('cdl_mode', 'int:9'), ('popper', 'float')] + [(x, 'int') for x in cdl_keys]
+            meta['schema'] = {'type': 'Feature', 'properties': OrderedDict(new_attrs),  'geometry': 'Polygon'}
 
-            input_feats = len(geo)
-            print('{} features in {}'.format(input_feats, blank_fields))
-            temp_file = attr_fields.replace('.shp', '_temp.shp')
-            with fiona.open(temp_file, 'w', **meta) as tmp:
-                for feat in geo:
-                    tmp.write(feat)
-
-            meta['schema'] = {'type': 'Feature', 'properties': OrderedDict(
-                [('FID', 'int:9'), ('CDL', 'int:9'), ('popper', 'float')]),
-                              'geometry': 'Polygon'}
-            in_raster = os.path.join(cdl, 'CDL_2017_{}.tif'.format(s))
-            stats = zonal_stats(temp_file, in_raster, stats=['majority'], nodata=0.0, categorical=True)
-
-            include_codes = [k for k in cdl_crops().keys()]
-
-            ct_inval = 0
-            ct_non_crop = 0
+            ct_inval, wct = 0, 0
             with fiona.open(attr_fields, mode='w', **meta) as out:
-                for attr, g in zip(stats, geo):
-
-                    try:
-                        cdl_code = int(attr['majority'])
-                    except TypeError:
-                        cdl_code = 0
-
-                    cropped = attr['majority'] in include_codes
-
-                    feat = {'type': 'Feature',
-                            'properties': {'FID': ct,
-                                           'CDL': cdl_code},
-                            'geometry': g['geometry']}
+                for feat in features:
 
                     if not feat['geometry']:
                         ct_inval += 1
@@ -102,12 +100,42 @@ def attribute_county_fields(county_shp_dir, out_co_dir, cdl):
                         ct_inval += 1
                     else:
                         out.write(feat)
-                        ct += 1
-                        ct_non_crop += 1
+                        wct += 1
 
-                print('{} in, {} out, {} invalid, {}'.format(input_feats, ct - 1, ct_inval, attr_fields))
-                rm_files = [temp_file.replace('shp', x) for x in ['prj', 'cpg', 'dbf', 'shx']] + [temp_file]
-                [os.remove(f) for f in rm_files]
+                print('{} in, {} written, {} invalid, {}'.format(fct, wct, ct_inval, attr_fields))
+
+
+def write_potential_training_data(fields, pivot_dir, dryland_dir, uncultivated_dir):
+    crops = cdl_crops().keys()
+    state_codes = state_fips_code()
+    for s, c in state_codes.items():
+        if s != 'SD':
+            continue
+        s_dir = os.path.join(fields, s)
+        if not os.path.isdir(s_dir):
+            os.mkdir(s_dir)
+
+        for k, v in state_county_code()[s].items():
+            geoid = v['GEOID']
+            if geoid != '46125':
+                continue
+            raw_fields = os.path.join(fields, s, '{}.shp'.format(geoid))
+            pivot, uncult, dry = [], [], []
+            with fiona.open(raw_fields, 'r') as src:
+                for f in src:
+                    props = f['properties']
+                    popper_ = props['popper']
+                    cdl_ = props['CDL']
+                    if popper_ > 0.9:
+                        pivot.append(f)
+                    elif 0.7 < popper_ < 0.8 and cdl_ in crops:
+                        dry.append(f)
+                    elif cdl_ == 61:
+                        pass
+                    elif cdl_ not in crops:
+                        uncult.append(f)
+
+            pass
 
 
 if __name__ == '__main__':
@@ -115,10 +143,13 @@ if __name__ == '__main__':
     if not os.path.exists(gis):
         gis = '/home/dgketchum/data/IrrigationGIS'
     co_shp_ = os.path.join(gis, 'boundaries/counties/county_shapefiles')
-    cdl_ = os.path.join(gis, 'cdl', 'wgs')
+    # cdl_ = os.path.join(gis, 'cdl', 'wgs')
     state_fields_ = os.path.join(gis, 'openET/OpenET_GeoDatabase')
-    co_fields_ = os.path.join(gis, 'openET/county_fields_blank_aea')
+    co_fields_ = os.path.join(gis, 'openET/county_fields_aea')
     co_fields_attr = os.path.join(gis, 'openET/county_fields_attr')
     # clip_field_boundaries_county(state_fields_, co_shp_, co_fields_)
-    attribute_county_fields(co_fields_, co_fields_attr, cdl_)
+    attribute_county_fields(co_fields_, co_fields_attr)
+    h = os.path.join(gis, 'training_data', 'humid', 'potential')
+    p_dir, u_dir, d_dir = os.path.join(h, 'pivot'), os.path.join(h, 'uncultivated'), os.path.join(h, 'unirrigated')
+    # write_potential_training_data(co_fields_attr, p_dir, d_dir, u_dir)
 # ========================= EOF ====================================================================
