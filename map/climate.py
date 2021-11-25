@@ -3,10 +3,9 @@ import json
 from datetime import date
 from calendar import monthrange
 
+import numpy as np
 from pandas import DataFrame, to_datetime, read_csv, date_range, concat
 import requests
-
-# requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 with open('/home/dgketchum/ncdc_noaa_token.json', 'r') as j:
     API_KEY = json.load(j)['auth']
@@ -41,7 +40,7 @@ def generate_precip_records(climate_dir, co_fip='46125'):
         dates = dates + [x['date'] for x in res]
         values = values + [x['value'] for x in res]
 
-    df = DataFrame(data={'prec': values})
+    df = DataFrame(data={'prec': values, 'date': dates})
     df.index = to_datetime(dates)
     params = {'stationid': target,
               'limit': 1000,
@@ -56,20 +55,44 @@ def generate_precip_records(climate_dir, co_fip='46125'):
     res = resp.json()['results']
     dt_range = date_range('1901-01-1', '1901-12-31', freq='M')
     values = [x['value'] for x in res]
-    ndf = DataFrame(data={'prec': values}, index=dt_range)
+    ndf = DataFrame(data={'prec': values, 'date': dt_range})
     df = concat([df, ndf], axis=0, ignore_index=False)
+    df['date'] = df.index
     out_csv = os.path.join(climate_dir, '{}.csv'.format(co_fip))
     df.to_csv(out_csv)
     return None
 
 
 def get_prec_anomaly(csv, start_month=4, end_month=9):
-    df = read_csv(csv)
-    s, e = df.index[0].year, df.index[-1].year
+    df = read_csv(csv, index_col='date', parse_dates=True)
+    df.drop(columns=[x for x in df.columns if x != 'prec'], inplace=True)
+    df = df.sort_index()
+
+    dct = {}
+
+    s = '1901-{}-01'.format(str(start_month).rjust(2, '0'))
+    month_end = monthrange(1901, end_month)[1]
+    e = '1901-{}-{}'.format(str(end_month).rjust(2, '0'), month_end)
+    normal = df[s: e]['prec'].sum()
+
+    s, e = df['1997-01-01':].index[0].year, df['1997-01-01':].index[-1].year
     dates = [(date(y, start_month, 1), date(y, end_month, monthrange(y, end_month)[1])) for y in range(s, e + 1)]
-    prec = [df['prec'][d[0]: d[1]].sum() for d in dates]
+    deltas = [df[d[0]:d[1]].shape[0] for d in dates]
+    check_range = deltas.count(deltas[0]) == len(deltas)
+
+    # check for short records
+    r_mode = False
+    if not check_range:
+        vals, counts = np.unique(deltas, return_counts=True)
+        r_mode = vals[np.argmax(counts)].item()
+    for d, delta in zip(dates, deltas):
+        if delta < r_mode:
+            continue
+        dct[d[0].year] = df['prec'][d[0]: d[1]].sum() - normal
+
+    return dct
 
 
 if __name__ == '__main__':
-    generate_precip_records()
+    pass
 # ========================= EOF ====================================================================
