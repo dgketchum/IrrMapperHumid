@@ -90,7 +90,9 @@ def get_prec_anomaly(csv, start_month=4, end_month=9):
             continue
         dct[d[0].year] = df['prec'][d[0]: d[1]].sum() - normal
 
-    return dct
+    prcp = list(dct.items())
+    prcp.sort(key=lambda x: x[1])
+    return prcp
 
 
 if __name__ == '__main__':
