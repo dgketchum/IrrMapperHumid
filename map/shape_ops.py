@@ -1,12 +1,10 @@
 import os
-from pprint import pprint
 from subprocess import check_call
 from collections import OrderedDict
 
 import numpy as np
 import fiona
-from rasterstats import zonal_stats
-from shapely.geometry import shape, Polygon
+from shapely.geometry import shape
 
 from state_county_names_codes import state_fips_code, state_county_code
 from cdl import cdl_crops
@@ -27,14 +25,14 @@ def clip_field_boundaries_county(fields_dir, county_shp_dir, out_dir):
     """clip field boundaries from state to county, project to albers equal area EPSG:102008"""
     state_codes = state_fips_code()
     for s, c in state_codes.items():
-        if s != 'SD':
+        if s != 'NE':
             continue
         s_dir = os.path.join(out_dir, s)
         if not os.path.isdir(s_dir):
             os.mkdir(s_dir)
         state_fields = os.path.join(fields_dir, '{}.shp'.format(s))
         for k, v in state_county_code()[s].items():
-            if v['GEOID'] != '46125':
+            if v['GEOID'] != '31155':
                 continue
             co_field_filename = '{}.shp'.format(v['GEOID'])
             clip_src = os.path.join(county_shp_dir, co_field_filename)
@@ -46,7 +44,7 @@ def clip_field_boundaries_county(fields_dir, county_shp_dir, out_dir):
 def attribute_county_fields(county_shp_dir, out_co_dir, min_area=5e4):
     state_codes = state_fips_code()
     for s, c in state_codes.items():
-        if s != 'SD':
+        if s != 'NE':
             continue
         s_dir = os.path.join(out_co_dir, s)
         if not os.path.isdir(s_dir):
@@ -54,7 +52,7 @@ def attribute_county_fields(county_shp_dir, out_co_dir, min_area=5e4):
 
         for k, v in state_county_code()[s].items():
             geoid = v['GEOID']
-            if geoid != '46125':
+            if geoid != '31155':
                 continue
             raw_fields = os.path.join(county_shp_dir, s, '{}.shp'.format(geoid))
             attr_fields = os.path.join(out_co_dir, s, '{}.shp'.format(geoid))
@@ -74,6 +72,7 @@ def attribute_county_fields(county_shp_dir, out_co_dir, min_area=5e4):
                         if geo.area < min_area:
                             continue
                         popper_ = float(popper(geo))
+                        barea = geo.envelope.area / geo.area
                         props = feat['properties']
                         cdl_keys = [x for x in props.keys() if 'CROP_' in x]
                         cdl_ = [props[x] for x in cdl_keys]
@@ -82,13 +81,16 @@ def attribute_county_fields(county_shp_dir, out_co_dir, min_area=5e4):
                         feat['properties'] = {k: v for k, v in feat['properties'].items() if k in cdl_keys}
                         feat['properties'].update({'FID': ct,
                                                    'cdl_mode': cdl_mode,
-                                                   'popper': popper_})
+                                                   'popper': popper_,
+                                                   'bratio': barea})
 
                         features.append(feat)
                         ct += 1
                     except TypeError:
                         bad_geo_ct += 1
-            new_attrs = [('FID', 'int:9'), ('cdl_mode', 'int:9'), ('popper', 'float')] + [(x, 'int') for x in cdl_keys]
+            new_attrs = [('FID', 'int:9'), ('cdl_mode', 'int:9'),
+                         ('popper', 'float'),
+                         ('bratio', 'float')] + [(x, 'int') for x in cdl_keys]
             meta['schema'] = {'type': 'Feature', 'properties': OrderedDict(new_attrs), 'geometry': 'Polygon'}
 
             ct_inval, wct = 0, 0
@@ -110,7 +112,7 @@ def write_potential_training_data(fields, training_dir, climate_dir):
     crops = cdl_crops().keys()
     state_codes = state_fips_code()
     for s, c in state_codes.items():
-        if s != 'SD':
+        if s != 'NE':
             continue
         s_dir = os.path.join(fields, s)
         if not os.path.isdir(s_dir):
@@ -118,12 +120,13 @@ def write_potential_training_data(fields, training_dir, climate_dir):
 
         for k, v in state_county_code()[s].items():
             geoid = v['GEOID']
-            if geoid != '46125':
+            if geoid != '31155':
                 continue
 
             dry_years = get_dry_years(geoid, climate_dir, n_years=3)
-
+            p_ct, d_ct, u_ct = 0, 0, 0
             raw_fields = os.path.join(fields, s, '{}.shp'.format(geoid))
+            first = True
             for year in dry_years:
                 pivot, uncult, dry = [], [], []
                 with fiona.open(raw_fields, 'r') as src:
@@ -134,13 +137,18 @@ def write_potential_training_data(fields, training_dir, climate_dir):
                     for f in src:
                         props = f['properties']
                         popper_ = props['popper']
+                        bratio = props['bratio']
                         cdl_ = props['CROP_{}'.format(year)]
-                        if popper_ > 0.9:
+                        if popper_ > 0.95:
                             pivot.append(f)
-                        elif 0.7 < popper_ < 0.8 and cdl_ in crops:
+                            if first:
+                                p_ct += 1
+                        elif 0.7 < popper_ < 0.75 and cdl_ in crops and bratio < 1.15:
                             dry.append(f)
+                            d_ct += 1
                         elif cdl_ not in crops:
                             uncult.append(f)
+                            u_ct += 1
 
                 for features, t_dir in zip([pivot, uncult, dry], ['pivot', 'uncultivated', 'unirrigated']):
                     out_shp = os.path.join(training_dir, t_dir, '{}_{}.shp'.format(geoid, year))
@@ -149,6 +157,8 @@ def write_potential_training_data(fields, training_dir, climate_dir):
                         for feat in features:
                             f = {'type': 'Feature', 'properties': {'FID': ct}, 'geometry': feat['geometry']}
                             dst.write(f)
+                first = False
+            print('{} {} dry years: {}, {} pivot, {} dry, {} uncult'.format(s, geoid, dry_years, p_ct, d_ct, u_ct))
 
 
 def get_dry_years(geoid, climate_dir, n_years=3):
@@ -165,12 +175,11 @@ if __name__ == '__main__':
     if not os.path.exists(gis):
         gis = '/home/dgketchum/data/IrrigationGIS'
     co_shp_ = os.path.join(gis, 'boundaries/counties/county_shapefiles')
-    # cdl_ = os.path.join(gis, 'cdl', 'wgs')
     state_fields_ = os.path.join(gis, 'openET/OpenET_GeoDatabase')
     co_fields_ = os.path.join(gis, 'openET/county_fields_aea')
     co_fields_attr = os.path.join(gis, 'openET/county_fields_attr')
     # clip_field_boundaries_county(state_fields_, co_shp_, co_fields_)
-    # attribute_county_fields(co_fields_, co_fields_attr)
+    attribute_county_fields(co_fields_, co_fields_attr)
     co_climate = os.path.join(gis, 'training_data', 'humid', 'county_precip_normals')
     potential = os.path.join(gis, 'training_data', 'humid', 'potential')
     write_potential_training_data(co_fields_attr, potential, co_climate)

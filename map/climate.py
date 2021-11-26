@@ -55,7 +55,7 @@ def generate_precip_records(climate_dir, co_fip='46125'):
     res = resp.json()['results']
     dt_range = date_range('1901-01-1', '1901-12-31', freq='M')
     values = [x['value'] for x in res]
-    ndf = DataFrame(data={'prec': values, 'date': dt_range})
+    ndf = DataFrame(data={'prec': values, 'date': dt_range}, index=dt_range)
     df = concat([df, ndf], axis=0, ignore_index=False)
     df['date'] = df.index
     out_csv = os.path.join(climate_dir, '{}.csv'.format(co_fip))
