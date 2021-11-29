@@ -27,17 +27,18 @@ AEA = '+proj=aea +lat_0=40 +lon_0=-96 +lat_1=20 +lat_2=60 +x_0=0 +y_0=0 +ellps=G
       '+towgs84=0,0,0,0,0,0,0 +units=m +no_defs'
 WGS = '+proj=longlat +datum=WGS84 +no_defs'
 
-TEST_COUNTIES = ['31097', '31035', '31011', '31181', '31059', '31127', '31001', '31053', '31027', '31071', '31151',
-                 '31185', '31067', '31051', '31133', '31125', '31079', '31147', '31179', '31173', '31081', '31095',
-                 '31003', '31119', '31089', '31093', '31099', '31023', '31129', '31153', '31019', '31155', '31139',
-                 '31141', '31167', '31107', '31039', '31021', '31169', '31037', '31015', '31109', '31055', '31175',
-                 '31143', '31131', '31061', '31183', '31121', '31043', '31177', '31163', '31159', '31077']
+ne_test = ['31097', '31035', '31011', '31181', '31059', '31127', '31001', '31053', '31027', '31071', '31151',
+           '31185', '31067', '31051', '31133', '31125', '31079', '31147', '31179', '31173', '31081', '31095',
+           '31003', '31119', '31089', '31093', '31099', '31023', '31129', '31153', '31019', '31155', '31139',
+           '31141', '31167', '31107', '31039', '31021', '31169', '31037', '31015', '31109', '31055', '31175',
+           '31143', '31131', '31061', '31183', '31121', '31043', '31177', '31163', '31159', '31077']
+
+TEST_COUNTIES = [c for c in ne_test if c not in ['31081', '31109', '31121', '31167', '31169', '31173']]
 
 
 def county_training_devlopment(state_fields, training_dir, county_shape_wgs,
                                county_fields_aea, county_attr,
                                county_shape_aea, climate, landcover):
-
     cmd = [GS, 'ls', os.path.join(_bucket, 'county_points')]
     existing = [x.decode('utf-8') for x in run(cmd, stdout=PIPE).stdout.splitlines()]
     failures = []
@@ -66,6 +67,7 @@ def county_training_devlopment(state_fields, training_dir, county_shape_wgs,
                 print(geoid, e)
                 failures.append(geoid)
     print(failures)
+
 
 def points_to_geographic(geoid, _dir):
     target_dir = os.path.join(_dir, geoid)

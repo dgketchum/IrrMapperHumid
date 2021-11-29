@@ -46,7 +46,8 @@ def get_bands(geoid, state, years, southern=False):
         pts = 'users/dgketchum/points/county/pts_{}'.format(geoid)
         geo = 'users/dgketchum/boundaries/{}'.format(state)
         file_ = 'bands_{}'.format(geoid)
-        request_band_extract(file_, pts, region=geo, years=years, filter_bounds=True,
+        request_band_extract(file_prefix=file_, points_layer=pts, region=geo,
+                             years=years, filter_bounds=True,
                              buffer=1e4, southern=southern, filter_years=False)
     except Exception as e:
         print(geoid, e)
