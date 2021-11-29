@@ -115,6 +115,24 @@ def get_prec_anomaly(csv, start_month=4, end_month=9):
     return prcp
 
 
+def get_climate(geoid, climate_dir, return_dry=True, n_years=3):
+    precip_record = os.path.join(climate_dir, '{}.csv'.format(geoid))
+    if not os.path.exists(precip_record):
+        generate_precip_records(climate_dir, geoid)
+        if not return_dry:
+            return None
+    precip_record = get_prec_anomaly(precip_record)
+    dry_years = [x[0] for x in precip_record[:n_years]]
+    if return_dry:
+        return dry_years
+    else:
+        return precip_record
+
+
 if __name__ == '__main__':
-    pass
+    gis = os.path.join('/media/research', 'IrrigationGIS')
+    if not os.path.exists(gis):
+        gis = '/home/dgketchum/data/IrrigationGIS'
+    _co_climate = os.path.join(gis, 'training_data', 'humid', 'county_precip_normals')
+    generate_precip_records('31025', _co_climate)
 # ========================= EOF ====================================================================
